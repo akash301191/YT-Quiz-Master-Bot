@@ -1,0 +1,4 @@
+youtube_transcript_api==1.0.3
+streamlit==1.44.0
+agno==1.2.6
+openai==1.70.0
