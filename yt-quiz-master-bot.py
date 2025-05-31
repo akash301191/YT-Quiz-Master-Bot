@@ -105,7 +105,7 @@ def generate_youtube_quiz(user_quiz_preferences) -> str:
             "- 'Beginner': Basic recall questions.",
             "- 'Intermediate': Conceptual or reasoning-based.",
             "- 'Advanced': Analytical, comparative, or applied questions.",
-            "Generate 2–3 questions per concept depending on depth.",
+            "Generate 5-10 questions per concept depending on depth.",
             "Follow this exact structure for output:",
             "1. Question text",
             "   - A. Option A",
