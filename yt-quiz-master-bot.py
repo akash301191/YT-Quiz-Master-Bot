@@ -3,6 +3,7 @@ from agno.models.openai import OpenAIChat
 from agno.tools.youtube import YouTubeTools
 from textwrap import dedent
 
+import re, json
 import streamlit as st
 
 def render_sidebar():
@@ -91,24 +92,36 @@ def generate_youtube_quiz(user_quiz_preferences) -> str:
         
         description="""
             You are a quiz generation expert. You receive a set of core learning concepts along with user preferences such as question style and difficulty.
-            Your job is to turn those concepts into a clean, well-structured quiz that can be presented directly to learners.
+            Your job is to turn those concepts into a clean, consistently structured quiz that can be presented directly to learners.
         """,
 
         instructions=[
-            "Read the provided list of learning concepts carefully. These are the only source material for your quiz.",
-            "Use the user's preferences to determine the quiz format:",
-            "- If 'Multiple Choice': Create 4 answer options (A–D), with one correct answer clearly marked in **bold**.",
-            "- If 'Short Answer': Ask concise open-ended questions expecting 1–2 sentence responses.",
-            "- If 'Mixed': Combine both types, alternating or mixing formats logically.",
-            "Apply the specified difficulty level to control the complexity of the questions:",
-            "- 'Beginner': Focus on basic recall and clear understanding.",
-            "- 'Intermediate': Emphasize reasoning, comparisons, or multi-step ideas.",
-            "- 'Advanced': Include nuanced or applied questions requiring deeper insight.",
-            "Generate 3-4 questions per concept depending on its depth.",
-            "Number all questions sequentially.",
-            "Present the final output in clean **Markdown**.",
-            "Do NOT include any introductory text, explanations, or instructions — only the quiz content.",
-            "Do not fabricate content. Use only the information explicitly provided in the concepts.",
+            "Carefully read the provided list of learning concepts. These are your only source of truth for creating questions.",
+            "Respect the user's preferences for question style and difficulty:",
+            "- If 'Multiple Choice': Write 4 options (A–D). **Bold the correct answer**.",
+            "- If 'Short Answer': Ask an open-ended question suitable for a 1–2 sentence response.",
+            "- If 'Mixed': Mix both styles logically.",
+            "Apply the specified difficulty level:",
+            "- 'Beginner': Basic recall questions.",
+            "- 'Intermediate': Conceptual or reasoning-based.",
+            "- 'Advanced': Analytical, comparative, or applied questions.",
+            "Generate 2–3 questions per concept depending on depth.",
+            "Follow this exact structure for output:",
+            "1. Question text",
+            "   - A. Option A",
+            "   - B. Option B",
+            "   - C. Option C",
+            "   - D. Option D",
+            "",
+            "   **Correct Answer: C**",
+            "",
+            "OR for short answer:",
+            "2. Question text",
+            "   (Short Answer)",
+            "",
+            "Title your output with:",
+            "### 📘 Quiz Title: Concept Review Quiz",
+            "Do not include additional commentary or explanation before or after the quiz.",
         ],
 
         markdown=True,
@@ -130,7 +143,102 @@ def generate_youtube_quiz(user_quiz_preferences) -> str:
 
     return youtube_quiz
     
+def clean_markdown(text):
+    # Removes bold (**text**), italic (*text* or _text_), inline code (`text`)
+    return re.sub(r'[*_`]+', '', text).strip()
 
+def render_structured_quiz(quiz_markdown: str):
+    st.markdown("## 🧪 Interactive Quiz")
+
+    user_responses = []
+
+    col1, col2 = st.columns(2)
+    with col1:
+        # Remove title from markdown
+        cleaned_markdown = re.sub(r'### 📘 Quiz Title:.*\n?', '', quiz_markdown).strip()
+
+        # Split questions
+        question_blocks = re.split(r'\n(?=\d+\.\s)', cleaned_markdown)
+
+        for idx, block in enumerate(question_blocks):
+            lines = block.strip().split('\n')
+            if not lines or len(lines[0].strip()) == 0:
+                continue
+
+            question_line = lines[0]
+            question_text_raw = re.sub(r'^\d+\.\s*', '', question_line).strip()
+
+            # Collect option lines (those that begin with A–D style)
+            options = [clean_markdown(line.strip()[3:].strip()) for line in lines[1:] if line.strip().startswith(('-', '–'))]
+
+            # Check if it's a short answer: either explicitly marked or has no options
+            is_short_answer = "(Short Answer)" in question_text_raw or len(options) == 0
+
+            # Render the question
+            st.markdown(f"**{question_line}**")
+
+            # Capture response
+            if is_short_answer:
+                response = st.text_input("Your Answer:", key=f"text_input_{idx}")
+            else:
+                response = st.radio("Select an option:", options, key=f"radio_{idx}", index=None)
+
+            # Append structured response
+            user_responses.append({
+                "question_number": idx + 1,
+                "question_text": question_text_raw,
+                "question_type": "short_answer" if is_short_answer else "multiple_choice",
+                "options": options if not is_short_answer else None,
+                "user_answer": response
+            })
+
+    st.markdown("---")
+
+    return user_responses
+
+def grade_quiz_responses(user_responses):
+    # Format data to JSON
+    user_response_json = json.dumps(user_responses, indent=2)
+
+    grading_agent = Agent(
+        name="Quiz Grading Agent",
+        role="Evaluates quiz responses and returns a score with detailed feedback.",
+        model=OpenAIChat(id="gpt-4o", api_key=st.session_state.openai_api_key),
+        description="""
+            You are a grading assistant. You are given a list of quiz questions with user responses. 
+            Evaluate each answer for correctness and clarity, and assign partial or full credit.
+            Return an overall score, and individual feedback per question.
+        """,
+        instructions=[
+            "You will receive a JSON list of user responses.",
+            "Each item contains: question text, user answer, question type, and options (if any).",
+            "For multiple-choice, check if the answer matches the correct choice (you can infer or reason it from the question text).",
+            "For short answer, assess if the user response is factually correct and relevant.",
+            "Return the following structured output:",
+            "- A numbered list of feedback per question: correctness, explanation, and score (out of 1).",
+            "- Final total score out of total questions.",
+            "- Bonus: Mention 1 area to improve for the user.",
+            "Use clean, readable Markdown in your final output."
+        ],
+        markdown=True,
+        add_datetime_to_instructions=False,
+    )
+
+    # Send to grading agent
+    prompt = f"""
+    You are grading the following user quiz responses. The list is provided as structured JSON.
+
+    {user_response_json}
+
+    Evaluate and return:
+    - Feedback per question
+    - Score out of total
+    - One improvement suggestion
+    """
+    grading_result = grading_agent.run(prompt)
+    return grading_result.content
+
+        
 def main() -> None:
     # Page config
     st.set_page_config(page_title="YT Quiz Master Bot", page_icon="❓", layout="wide")
@@ -147,6 +255,10 @@ def main() -> None:
             max-width: 1200px;
             margin-left: auto;
             margin-right: auto;
+        }
+        .stTextInput > div > div > input {
+            margin-left: 0 !important;
+            text-align: left !important;
         }
         </style>
         """,
@@ -174,15 +286,25 @@ def main() -> None:
                 st.session_state.youtube_quiz = youtube_quiz
 
     if "youtube_quiz" in st.session_state:
-        st.markdown("## 📝 Generated Quiz")
-        st.markdown(st.session_state.youtube_quiz, unsafe_allow_html=True)
+        user_quiz_responses = render_structured_quiz(st.session_state.youtube_quiz)
 
-        st.download_button(
-            label="📥 Download Quiz",
-            data=st.session_state.youtube_quiz,
-            file_name="youtube_quiz.md",
-            mime="text/markdown"
-        )
+        col1, col2 = st.columns([1, 1])
+
+        with col1:
+            if st.button("📝 Submit & Get Score"):
+                with st.spinner("Grading your quiz..."):
+                    feedback = grade_quiz_responses(user_quiz_responses)
+                    st.markdown("## 📊 Quiz Feedback")
+                    st.markdown(feedback, unsafe_allow_html=True)
+
+        with col2:
+            st.download_button(
+                label="📥 Download Quiz",
+                data=st.session_state.youtube_quiz,
+                file_name="youtube_quiz.md",
+                mime="text/markdown"
+            )
+
 
 
 if __name__ == "__main__":
